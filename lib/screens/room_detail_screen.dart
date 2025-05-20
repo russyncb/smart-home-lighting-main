@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:illumi_home/models/room.dart';
 import 'package:illumi_home/services/database_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class RoomDetailScreen extends StatefulWidget {
   final Room room;
@@ -19,8 +20,6 @@ class RoomDetailScreen extends StatefulWidget {
 
 class _RoomDetailScreenState extends State<RoomDetailScreen> {
   final DatabaseService _databaseService = DatabaseService();
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  bool _isLoading = false;
   late Room _room;
   StreamSubscription? _roomSubscription;
   
@@ -40,7 +39,13 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   void _subscribeToRoomUpdates() {
     // Subscribe to real-time updates for this specific room
     _roomSubscription?.cancel();
-    _roomSubscription = _firestore
+    
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    
+    _roomSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
         .collection('rooms')
         .doc(_room.id)
         .snapshots()
@@ -48,7 +53,8 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
       (snapshot) {
         if (snapshot.exists && mounted) {
           setState(() {
-            _room = Room.fromMap(snapshot.data()!, snapshot.id);
+            final data = snapshot.data() as Map<String, dynamic>;
+            _room = Room.fromMap(data, _room.id);
           });
         }
       },
@@ -59,77 +65,194 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
   }
   
   Future<void> _toggleLight(String lightId, bool newState) async {
+    // Find the light
+    final lightIndex = _room.lights.indexWhere((l) => l.id == lightId);
+    if (lightIndex == -1) return;
+
+    // Create a new list of lights with the updated light
+    final updatedLights = List<Light>.from(_room.lights);
+    final oldLight = updatedLights[lightIndex];
+    
+    // Replace the light with a new instance that has the updated state
+    updatedLights[lightIndex] = Light(
+      id: oldLight.id,
+      name: oldLight.name,
+      isOn: newState, // This is the change
+      brightness: oldLight.brightness,
+      hasMotionSensor: oldLight.hasMotionSensor,
+      motionSensorActive: oldLight.motionSensorActive,
+      hasSchedule: oldLight.hasSchedule,
+      onTime: oldLight.onTime,
+      offTime: oldLight.offTime,
+    );
+    
+    // Create a new room with the updated lights
+    final updatedRoom = Room(
+      id: _room.id,
+      name: _room.name,
+      type: _room.type,
+      lights: updatedLights,
+    );
+    
+    // Update UI immediately
     setState(() {
-      _isLoading = true;
+      _room = updatedRoom;
     });
     
     try {
-      // Toggle light in Firestore
+      // Update database in background
       await _databaseService.toggleLight(
-        _room.id, 
-        lightId, 
+        _room.id,
+        lightId,
         newState
       );
-      
-      // No need to update state manually, as we're listening to Firestore changes
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error toggling light: $e')),
-      );
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      // If error, revert to previous state
+      if (mounted) {
+        setState(() {
+          // Revert back to original room
+          _room = widget.room;
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error toggling light: $e')),
+        );
+      }
     }
   }
   
   Future<void> _adjustBrightness(String lightId, double brightness) async {
+    // Find the light
+    final lightIndex = _room.lights.indexWhere((l) => l.id == lightId);
+    if (lightIndex == -1) return;
+
+    // Get current light
+    final oldLight = _room.lights[lightIndex];
+    final brightnessValue = brightness.toInt();
+    
+    // Create a new list of lights with the updated light
+    final updatedLights = List<Light>.from(_room.lights);
+    
+    // Replace the light with a new instance that has the updated brightness
+    updatedLights[lightIndex] = Light(
+      id: oldLight.id,
+      name: oldLight.name,
+      isOn: oldLight.isOn,
+      brightness: brightnessValue, // This is the change
+      hasMotionSensor: oldLight.hasMotionSensor,
+      motionSensorActive: oldLight.motionSensorActive,
+      hasSchedule: oldLight.hasSchedule,
+      onTime: oldLight.onTime,
+      offTime: oldLight.offTime,
+    );
+    
+    // Create a new room with the updated lights
+    final updatedRoom = Room(
+      id: _room.id,
+      name: _room.name,
+      type: _room.type,
+      lights: updatedLights,
+    );
+    
+    // Update UI immediately
     setState(() {
-      _isLoading = true;
+      _room = updatedRoom;
     });
     
     try {
-      // Update brightness in Firestore
+      // Update database in background
       await _databaseService.adjustBrightness(
-        _room.id, 
-        lightId, 
-        brightness.toInt()
+        _room.id,
+        lightId,
+        brightnessValue
       );
-      
-      // No need to update state manually, as we're listening to Firestore changes
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adjusting brightness: $e')),
-      );
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      // If error, revert to previous state
+      if (mounted) {
+        setState(() {
+          // Revert back to original state
+          final originalLights = List<Light>.from(_room.lights);
+          originalLights[lightIndex] = oldLight;
+          
+          _room = Room(
+            id: _room.id,
+            name: _room.name,
+            type: _room.type,
+            lights: originalLights,
+          );
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adjusting brightness: $e')),
+        );
+      }
     }
   }
   
   Future<void> _toggleMotionSensor(String lightId, bool active) async {
+    // Find the light
+    final lightIndex = _room.lights.indexWhere((l) => l.id == lightId);
+    if (lightIndex == -1) return;
+
+    // Get current light
+    final oldLight = _room.lights[lightIndex];
+    
+    // Create a new list of lights with the updated light
+    final updatedLights = List<Light>.from(_room.lights);
+    
+    // Replace the light with a new instance that has the updated motion sensor state
+    updatedLights[lightIndex] = Light(
+      id: oldLight.id,
+      name: oldLight.name,
+      isOn: oldLight.isOn,
+      brightness: oldLight.brightness,
+      hasMotionSensor: oldLight.hasMotionSensor,
+      motionSensorActive: active, // This is the change
+      hasSchedule: oldLight.hasSchedule,
+      onTime: oldLight.onTime,
+      offTime: oldLight.offTime,
+    );
+    
+    // Create a new room with the updated lights
+    final updatedRoom = Room(
+      id: _room.id,
+      name: _room.name,
+      type: _room.type,
+      lights: updatedLights,
+    );
+    
+    // Update UI immediately
     setState(() {
-      _isLoading = true;
+      _room = updatedRoom;
     });
     
     try {
-      // Update motion sensor status in Firestore
+      // Update database in background
       await _databaseService.toggleMotionSensor(
-        _room.id, 
-        lightId, 
+        _room.id,
+        lightId,
         active
       );
-      
-      // No need to update state manually, as we're listening to Firestore changes
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error toggling motion sensor: $e')),
-      );
-    } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      // If error, revert to previous state
+      if (mounted) {
+        setState(() {
+          // Revert back to original state
+          final originalLights = List<Light>.from(_room.lights);
+          originalLights[lightIndex] = oldLight;
+          
+          _room = Room(
+            id: _room.id,
+            name: _room.name,
+            type: _room.type,
+            lights: originalLights,
+          );
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error toggling motion sensor: $e')),
+        );
+      }
     }
   }
 
@@ -152,176 +275,170 @@ class _RoomDetailScreenState extends State<RoomDetailScreen> {
             colors: [Color(0xFF0F172A), Color(0xFF1E293B)],
           ),
         ),
-        child: _isLoading
-            ? const Center(
-                child: CircularProgressIndicator(
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.amber),
-                ),
-              )
-            : ListView.builder(
-                padding: const EdgeInsets.all(16),
-                itemCount: _room.lights.length,
-                itemBuilder: (context, index) {
-                  final light = _room.lights[index];
-                  return Card(
-                    color: const Color(0xFF1E293B).withOpacity(0.5),
-                    margin: const EdgeInsets.only(bottom: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      side: BorderSide(color: Colors.grey.shade800),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Row(
-                                children: [
-                                  Container(
-                                    width: 48,
-                                    height: 48,
-                                    decoration: BoxDecoration(
-                                      color: light.isOn
-                                          ? Colors.amber.withOpacity(0.3)
-                                          : Colors.grey.withOpacity(0.2),
-                                      shape: BoxShape.circle,
-                                    ),
-                                    child: Icon(
-                                      Icons.lightbulb,
-                                      color: light.isOn ? Colors.amber : Colors.grey.shade500,
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        light.name,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 18,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                      Text(
-                                        light.isOn ? 'On' : 'Off',
-                                        style: TextStyle(
-                                          color: light.isOn ? Colors.amber : Colors.grey.shade400,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: _room.lights.length,
+          itemBuilder: (context, index) {
+            final light = _room.lights[index];
+            return Card(
+              color: const Color(0xFF1E293B).withOpacity(0.5),
+              margin: const EdgeInsets.only(bottom: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+                side: BorderSide(color: Colors.grey.shade800),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: light.isOn
+                                    ? Colors.amber.withOpacity(0.3)
+                                    : Colors.grey.withOpacity(0.2),
+                                shape: BoxShape.circle,
                               ),
-                              Switch(
-                                value: light.isOn,
-                                onChanged: (value) => _toggleLight(light.id, value),
-                                activeColor: Colors.amber,
-                                inactiveTrackColor: Colors.grey.shade700,
+                              child: Icon(
+                                Icons.lightbulb,
+                                color: light.isOn ? Colors.amber : Colors.grey.shade500,
+                                size: 24,
                               ),
-                            ],
-                          ),
-                          
-                          // Brightness slider
-                          const SizedBox(height: 16),
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.brightness_low,
-                                color: Colors.white70,
-                                size: 20,
-                              ),
-                              Expanded(
-                                child: Slider(
-                                  value: light.brightness.toDouble(),
-                                  min: 1,
-                                  max: 100,
-                                  divisions: 10,
-                                  activeColor: Colors.amber,
-                                  inactiveColor: Colors.grey.shade700,
-                                  label: '${light.brightness}%',
-                                  onChanged: light.isOn
-                                      ? (value) => _adjustBrightness(light.id, value)
-                                      : null,
-                                ),
-                              ),
-                              const Icon(
-                                Icons.brightness_high,
-                                color: Colors.white70,
-                                size: 20,
-                              ),
-                            ],
-                          ),
-                          
-                          // Show schedule settings if applicable
-                          if (light.hasSchedule) ...[
-                            const SizedBox(height: 16),
-                            const Divider(color: Colors.grey),
-                            const SizedBox(height: 8),
-                            Row(
+                            ),
+                            const SizedBox(width: 16),
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Icon(
-                                  Icons.schedule,
-                                  color: Colors.white70,
-                                  size: 20,
-                                ),
-                                const SizedBox(width: 8),
                                 Text(
-                                  'Scheduled: On at ${light.onTime}, Off at ${light.offTime}',
+                                  light.name,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                                Text(
+                                  light.isOn ? 'On' : 'Off',
                                   style: TextStyle(
-                                    color: Colors.grey.shade300,
+                                    color: light.isOn ? Colors.amber : Colors.grey.shade400,
                                     fontSize: 14,
                                   ),
                                 ),
                               ],
                             ),
                           ],
-                          
-                          // Show motion sensor settings if applicable
-                          if (light.hasMotionSensor) ...[
-                            const SizedBox(height: 16),
-                            const Divider(color: Colors.grey),
-                            const SizedBox(height: 8),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Row(
-                                  children: [
-                                    const Icon(
-                                      Icons.sensors,
-                                      color: Colors.white70,
-                                      size: 20,
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Text(
-                                      'Motion Sensor',
-                                      style: TextStyle(
-                                        color: Colors.grey.shade300,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                Switch(
-                                  value: light.motionSensorActive,
-                                  onChanged: (value) => _toggleMotionSensor(light.id, value),
-                                  activeColor: Colors.amber,
-                                  inactiveTrackColor: Colors.grey.shade700,
-                                ),
-                              ],
+                        ),
+                        Switch(
+                          value: light.isOn,
+                          onChanged: (value) => _toggleLight(light.id, value),
+                          activeColor: Colors.amber,
+                          inactiveTrackColor: Colors.grey.shade700,
+                        ),
+                      ],
+                    ),
+                    
+                    // Brightness slider
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.brightness_low,
+                          color: Colors.white70,
+                          size: 20,
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: light.brightness.toDouble(),
+                            min: 1,
+                            max: 100,
+                            divisions: 10,
+                            activeColor: Colors.amber,
+                            inactiveColor: Colors.grey.shade700,
+                            label: '${light.brightness}%',
+                            onChanged: light.isOn
+                                ? (value) => _adjustBrightness(light.id, value)
+                                : null,
+                          ),
+                        ),
+                        const Icon(
+                          Icons.brightness_high,
+                          color: Colors.white70,
+                          size: 20,
+                        ),
+                      ],
+                    ),
+                    
+                    // Show schedule settings if applicable
+                    if (light.hasSchedule) ...[
+                      const SizedBox(height: 16),
+                      const Divider(color: Colors.grey),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.schedule,
+                            color: Colors.white70,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Scheduled: On at ${light.onTime}, Off at ${light.offTime}',
+                            style: TextStyle(
+                              color: Colors.grey.shade300,
+                              fontSize: 14,
                             ),
-                          ],
+                          ),
                         ],
                       ),
-                    ),
-                  );
-                },
+                    ],
+                    
+                    // Show motion sensor settings if applicable
+                    if (light.hasMotionSensor) ...[
+                      const SizedBox(height: 16),
+                      const Divider(color: Colors.grey),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.sensors,
+                                color: Colors.white70,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                'Motion Sensor',
+                                style: TextStyle(
+                                  color: Colors.grey.shade300,
+                                  fontSize: 14,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Switch(
+                            value: light.motionSensorActive,
+                            onChanged: (value) => _toggleMotionSensor(light.id, value),
+                            activeColor: Colors.amber,
+                            inactiveTrackColor: Colors.grey.shade700,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
               ),
+            );
+          },
+        ),
       ),
     );
   }
